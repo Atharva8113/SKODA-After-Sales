@@ -1,0 +1,24 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+.env
+dist/
+build/
+*.spec
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Sample Data / PDFs
+*.pdf
+*_Skoda AG/
+*_VW AG/
+*.xlsx
+*.csv
+
