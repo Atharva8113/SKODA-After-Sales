@@ -11,6 +11,7 @@ import sys
 import re
 import csv
 import datetime
+import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import pdfplumber
@@ -78,9 +79,36 @@ def convert_eur_to_standard_format(value_str: str) -> str:
         except ValueError:
             return value_str
 
-    # Case 3: Already in standard format or integer
+    # Case 3: Only dot present
+    elif '.' in value_str:
+        # Ambiguous case: 9.600 could be 9.6 or 9600.
+        # In VW/European context, if no comma is present, dot is often thousands separator
+        # if there are exactly 3 digits after it.
+        parts_list = value_str.split('.')
+        if len(parts_list) == 2 and len(parts_list[1]) == 3:
+            # Likely thousands: 9.600 -> 9600
+            converted = value_str.replace('.', '')
+            try:
+                num = float(converted)
+                return f"{num:,.0f}"
+            except ValueError:
+                return value_str
+        else:
+            # Treat as standard decimal (e.g. 12.34 or 0.5)
+            try:
+                num = float(value_str)
+                decimal_places = len(value_str.split('.')[-1])
+                return f"{num:,.{decimal_places}f}"
+            except ValueError:
+                return value_str
+
+    # Case 4: No separators (integer)
     else:
-        return value_str
+        try:
+            num = float(value_str)
+            return f"{num:,.0f}"
+        except ValueError:
+            return value_str
 
 
 def eur_str_to_float(value_str: str) -> float:
@@ -103,7 +131,15 @@ def eur_str_to_float(value_str: str) -> float:
             # Standard: 2,236.90
             return float(value_str.replace(',', ''))
     elif ',' in value_str:
+        # European decimal: 0,297
         return float(value_str.replace(',', '.'))
+    elif '.' in value_str:
+        # Only dot. Check if likely thousands (3 digits after)
+        parts = value_str.split('.')
+        if len(parts) == 2 and len(parts[1]) == 3:
+            # 9.600 -> 9600
+            return float(value_str.replace('.', ''))
+        return float(value_str)
     else:
         try:
             return float(value_str)
@@ -184,6 +220,14 @@ COUNTRY_MAP: dict[str, str] = {
     "IE": "Ireland",
     "LU": "Luxembourg",
 }
+
+
+# ---------- HELPERS ----------
+def clean_part_number(part_no: str) -> str:
+    """Remove all non-alphanumeric characters and spaces from part number."""
+    if not part_no:
+        return ""
+    return re.sub(r'[^a-zA-Z0-9]', '', part_no)
 
 
 # ---------- CORE EXTRACTION LOGIC ----------
@@ -365,9 +409,7 @@ def extract_skoda_aftersales_invoice(pdf_path: str) -> dict:
 
                 if match2:
                     # Extract from Line 1
-                    raw_part_number = match1.group(1).strip()
-                    # Remove spaces from part number
-                    part_number = raw_part_number.replace(" ", "")
+                    part_number = clean_part_number(match1.group(1).strip())
                     hs_code = match1.group(2).strip()
                     quantity_str = match1.group(3).strip()
                     uom = match1.group(4).strip()
@@ -434,38 +476,287 @@ def extract_skoda_aftersales_invoice(pdf_path: str) -> dict:
     }
 
 
-# ---------- CSV OUTPUT ----------
-def write_csv(output_path: str, all_records: list[dict]) -> None:
-    """Write all extracted records to a single CSV file."""
+def extract_vw_aftersales_invoice(pdf_path: str) -> dict:
+    """
+    Extract all line-item data from a single Volkswagen AG After Sales invoice PDF.
+    Uses coordinate-based reconstruction and horizontal "buckets" to handle layout.
+    """
+    invoice_number = ""
+    invoice_date = ""
+    currency = "USD"
+    items = []
+    
+    header_skip_patterns = [
+        "RECHNUNG/INVOICE", "WIEDERHOLUNGSDRUCK", "FACTURE/FACTURA", 
+        "REIMPRIME/REPETICION", "ORDER-NO.", "CUST.MAT.NO.", "DELIVERY POS.",
+        "USt.-ID-Nr.", "Finanzamt", "Chairman of", "Board of", 
+        "Commerzbank", "IBAN:", "VWBank", "J.P.Morgan", "tax-free export"
+    ]
+
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            # 1. Header Extraction (Usually on first page)
+            first_page = pdf.pages[0].extract_text()
+            header_inv_match = re.search(r"INVOICE\s*:\s*(\d{8,})", first_page)
+            if header_inv_match:
+                invoice_number = header_inv_match.group(1)
+
+            header_date_match = re.search(
+                r"DATUM/DATE/DATE/FECHA:\s*(\d{2}\.\d{2}\.\d{4})", first_page
+            )
+            if header_date_match:
+                invoice_date = header_date_match.group(1)
+
+            # 2. Sequential Line Reconstruction across all pages
+            all_reconstructed_lines = []
+            for page in pdf.pages:
+                words = page.extract_words(x_tolerance=3, y_tolerance=3)
+                if not words: continue
+                
+                lines_map = {}
+                for w in words:
+                    top = round(w['top'], 1)
+                    if top not in lines_map: lines_map[top] = []
+                    lines_map[top].append(w)
+                
+                for top in sorted(lines_map.keys()):
+                    line_words = sorted(lines_map[top], key=lambda x: x['x0'])
+                    joined_text = " ".join([w['text'] for w in line_words])
+                    
+                    # Store line words list itself for coordinate processing
+                    all_reconstructed_lines.append((joined_text, line_words))
+
+            # 3. Process the lines
+            current_package = ""
+            pending_line1 = None
+            
+            for line_text, words in all_reconstructed_lines:
+                # Package Tracking
+                if "Package" in line_text:
+                    pkg_match = re.search(r"Package\s+(\d+)", line_text)
+                    if pkg_match:
+                        current_package = pkg_match.group(1)
+                    continue
+
+                # Filter headers/footers
+                if any(p in line_text for p in header_skip_patterns):
+                    continue
+
+                # Item Line 2 (Weight line) starts with 4-digit POS
+                # e.g. "0010 0,904" (sometimes with underscores like "____0010____")
+                pos_text = re.sub(r'_', '', words[0]["text"])
+                if len(words) >= 2 and re.match(r"^\d{4}$", pos_text):
+                    if pending_line1:
+                        # Extract weight from line 2
+                        weight_str = "0"
+                        # Search for the numeric weight value (comma as decimal), stripping underscores
+                        for w in words:
+                            w_cleaned = re.sub(r'_', '', w['text'])
+                            # Must be numeric and not the POS we just found
+                            if re.match(r'^[\d.,]+$', w_cleaned) and w_cleaned != pos_text:
+                                weight_str = w_cleaned
+                                break
+                        
+                        item = pending_line1.copy()
+                        item["Net Weight (KG)"] = convert_eur_to_standard_format(weight_str)
+                        items.append(item)
+                        pending_line1 = None
+                    continue
+
+                # Item Line 1 (Main data)
+                # Structure: PartNo (Zone < 221), Desc (Zone 221-290), DelNo (Zone 290-440), 
+                # CoO (440-500), HS (500-570), Qty, Price, Base, Total
+                
+                # Coordinate thresholds based on analysis of 76172193.pdf
+                parts = {"PartNo": [], "Desc": [], "DelNo": "", "CoO": "", "HS": "", "Qty": "", "Price": "", "Total": ""}
+                
+                for w in words:
+                    x0 = w["x0"]
+                    txt = w["text"]
+                    if x0 < 221:
+                        parts["PartNo"].append(txt)
+                    elif x0 < 290:
+                        parts["Desc"].append(txt)
+                    elif x0 < 440:
+                        if re.match(r"^\d{9}$", txt): parts["DelNo"] = txt
+                    elif x0 < 500:
+                        if re.match(r"^[A-Z]{2}$", txt): parts["CoO"] = txt
+                    elif x0 < 550:
+                        if re.match(r"^\d{6,10}$", txt): parts["HS"] = txt
+                    elif x0 < 605:
+                        # Quantity column (Header ~550)
+                        parts["Qty"] = txt
+                    elif x0 < 670:
+                        # Unit Price column (Header ~631)
+                        # Ensure we don't accidentally take a tiny Qty if it drifted right
+                        if not parts["Price"] or re.search(r'[\.,]\d{2}', txt):
+                            parts["Price"] = txt
+                    elif x0 < 720:
+                        # Base value column (Header ~719) - usually 0.00
+                        pass
+                    elif x0 < 780:
+                        # Value of goods column (Header ~743)
+                        # Strictly take numeric values to avoid flags like 'X' at ~785
+                        if re.match(r'^[\d\.,\s]+$', txt):
+                            parts["Total"] = txt
+                
+                if parts["DelNo"] and parts["CoO"]:
+                    # If we have a pending line 1 that didn't get its weight row, save it now
+                    if pending_line1:
+                        # Use 0 or N/A for weight since we didn't find the second line
+                        temp_item = pending_line1.copy()
+                        if "Net Weight (KG)" not in temp_item:
+                            temp_item["Net Weight (KG)"] = "0"
+                        items.append(temp_item)
+                    
+                    # Found a valid Line 1
+                    pending_line1 = {
+                        "Invoice Number": invoice_number,
+                        "Invoice Date": invoice_date,
+                        "Package Number": current_package,
+                        "Part Number": clean_part_number(" ".join(parts["PartNo"])),
+                        "Description": " ".join(parts["Desc"]),
+                        "COO": parts["CoO"],
+                        "HS-CODE": parts["HS"],
+                        "QUANTITY": convert_eur_to_standard_format(parts["Qty"]),
+                        "UNIT PRICE": convert_eur_to_standard_format(parts["Price"]),
+                        "VALUE OF GOODS": convert_eur_to_standard_format(parts["Total"]),
+                        "Currency": currency,
+                    }
+
+            # Final check for the last item (if it didn't have a weight line)
+            if pending_line1:
+                temp_item = pending_line1.copy()
+                if "Net Weight (KG)" not in temp_item:
+                    temp_item["Net Weight (KG)"] = "0"
+                items.append(temp_item)
+
+    except Exception as e:
+        print(f"Error extracting VW PDF {pdf_path}: {str(e)}")
+
+    return {
+        "invoice_number": invoice_number,
+        "invoice_date": invoice_date,
+        "currency": currency,
+        "items": items,
+    }
+
+
+# ---------- EXCEL OUTPUT ----------
+def write_excel(output_path: str, all_records: list[dict], is_vw: bool = False) -> None:
+    """Write all extracted records to a single Excel file using Pandas."""
     if not all_records:
         return
 
-    fieldnames = [
-        "Invoice Number",
-        "Invoice Date",
-        "Part Number",
-        "Description",
-        "Wgt./Unit",
-        "Country Code",
-        "HS Code",
-        "Default",
-        "Quantity",
-        "UOM",
-        "Unit Price",
-        "Total Price",
-        "Currency",
-    ]
+    # Define Header Mapping to match user requirement strictly
+    # Map raw keys to Display Headers
+    mapping = {
+        "Invoice Number": "Invoice Number",
+        "Invoice Date": "Invoice Date",
+        "Package Number": "Package Number",
+        "Part Number": "Part Number",
+        "Description": "Description",
+        "Wgt./Unit": "NET WEIGHT(KG)",
+        "Net Weight (KG)": "NET WEIGHT(KG)",
+        "Country Code": "COO",
+        "COO": "COO",
+        "HS Code": "HS-CODE",
+        "HS-CODE": "HS-CODE",
+        "Quantity": "QUANTITY",
+        "QUANTITY": "QUANTITY",
+        "Unit Price": "UNIT PRICE",
+        "UNIT PRICE": "UNIT PRICE",
+        "Total Price": "VALUE OF GOODS",
+        "VALUE OF GOODS": "VALUE OF GOODS",
+    }
+    
+    # Selection of columns
+    if is_vw:
+        display_fields = [
+            "Invoice Number", "Invoice Date", "Package Number", "Part Number",
+            "Description", "NET WEIGHT(KG)", "COO", "HS-CODE",
+            "QUANTITY", "UNIT PRICE", "VALUE OF GOODS"
+        ]
+    else:
+        # Skoda: No Package Number
+        display_fields = [
+            "Invoice Number", "Invoice Date", "Part Number",
+            "Description", "NET WEIGHT(KG)", "COO", "HS-CODE",
+            "QUANTITY", "UNIT PRICE", "VALUE OF GOODS"
+        ]
 
-    with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for record in all_records:
-            # Preserve leading zeros in Part Number for Excel
-            safe_record = dict(record)
-            part_no = safe_record.get("Part Number", "")
-            if part_no and part_no[0] == '0':
-                safe_record["Part Number"] = f'="{part_no}"'
-            writer.writerow(safe_record)
+    # Create DataFrame and rename
+    df_raw = pd.DataFrame(all_records)
+    
+    # Map existing columns to display names
+    for raw_key, disp_name in mapping.items():
+        if raw_key in df_raw.columns:
+            if disp_name not in df_raw.columns:
+                df_raw[disp_name] = df_raw[raw_key]
+            else:
+                # Fill missing if disp_name already exists (rare)
+                df_raw[disp_name] = df_raw[disp_name].fillna(df_raw[raw_key])
+
+    # Filter to only display fields
+    available_fields = [f for f in display_fields if f in df_raw.columns]
+    df = df_raw[available_fields].copy()
+
+    # --- Ensure Data Types for Excel ---
+    # 1. ID-like columns MUST be strings to preserve leading zeros
+    string_cols = ["Invoice Number", "Part Number", "Package Number", "HS-CODE"]
+    for col in string_cols:
+        if col in df.columns:
+            df[col] = df[col].astype(str).replace('nan', '')
+
+    # 2. Numeric columns MUST be floats for Excel to treat them as numbers
+    numeric_cols = ["NET WEIGHT(KG)", "QUANTITY", "UNIT PRICE", "VALUE OF GOODS"]
+    for col in numeric_cols:
+        if col in df.columns:
+            def clean_to_float(v):
+                if pd.isna(v) or v == "" or v == "N/A":
+                    return 0.0
+                if isinstance(v, (int, float)):
+                    return float(v)
+                # Our standard format uses commas for thousands and dots for decimal
+                # e.g., '1,028.56' -> '1028.56'
+                s = str(v).replace(',', '')
+                try:
+                    return float(s)
+                except ValueError:
+                    return 0.0
+            
+            df[col] = df[col].apply(clean_to_float)
+
+    try:
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Sheet1')
+
+            # --- Custom Logic for Volkswagen: Package Count ---
+            if is_vw and "Package Number" in df.columns:
+                # Get unique packages (non-empty)
+                pkgs = [str(p).strip() for p in df["Package Number"].dropna().unique() if str(p).strip()]
+                unique_count = len(pkgs)
+                
+                if unique_count > 0:
+                    worksheet = writer.sheets['Sheet1']
+                    # Add unique count summarized at the bottom
+                    last_row = len(df) + 3 # Leave a gap
+                    worksheet.cell(row=last_row, column=1, value="Total Unique Packages:")
+                    worksheet.cell(row=last_row, column=2, value=unique_count)
+
+            # Auto-adjust columns width
+            worksheet = writer.sheets['Sheet1']
+            for i, col in enumerate(df.columns):
+                col_data = df[col].astype(str)
+                max_val_len = col_data.str.len().max()
+                if pd.isna(max_val_len): max_val_len = 0
+                column_len = max(max_val_len, len(col)) + 2
+                # Convert index to Excel column letter
+                col_letter = chr(65 + i) if i < 26 else f"{chr(64 + i // 26)}{chr(65 + i % 26)}"
+                worksheet.column_dimensions[col_letter].width = min(column_len, 50)
+    except Exception as e:
+        print(f"Error writing Excel: {e}")
+        raise
 
 
 # ---------- NAGARKOT GUI IMPLEMENTATION ----------
@@ -542,8 +833,18 @@ class SkodaAfterSalesExtractorGUI:
             foreground=self.brand_color,
         )
 
-        self.setup_ui()
         self.selected_files: list[str] = []
+        
+        # Initialize UI variables
+        self.format_var = tk.StringVar(value="skoda")
+        self.mode_var = tk.StringVar(value="combined")
+        self.output_dir_var = tk.StringVar()
+        self.output_name_var = tk.StringVar(
+            value=f"Skoda_AfterSales_Extracted_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        self.status_var = tk.StringVar(value="Ready")
+
+        self.setup_ui()
 
     # ----- UI SETUP -----
     def setup_ui(self) -> None:
@@ -614,7 +915,7 @@ class SkodaAfterSalesExtractorGUI:
 
         self.btn_run = ttk.Button(
             footer_frame,
-            text="  Extract & Generate CSV  ",
+            text="  Extract & Generate Excel  ",
             command=self.run_extraction,
             style="Primary.TButton",
         )
@@ -654,6 +955,30 @@ class SkodaAfterSalesExtractorGUI:
         )
         self.lbl_count.pack(side="left", padx=(20, 0))
 
+        # --- Format Selection (Skoda vs Volkswagen) ---
+        format_frame = ttk.LabelFrame(
+            content_frame, text="Extraction Format", padding="15"
+        )
+        format_frame.pack(fill="x", pady=(0, 15))
+
+        # (Variable initialized in __init__)
+        
+        rb_skoda = ttk.Radiobutton(
+            format_frame,
+            text="Skoda AG After Sales",
+            variable=self.format_var,
+            value="skoda"
+        )
+        rb_skoda.pack(side="left", padx=(0, 20))
+
+        rb_vw = ttk.Radiobutton(
+            format_frame,
+            text="Volkswagen AG After Sales",
+            variable=self.format_var,
+            value="vw"
+        )
+        rb_vw.pack(side="left")
+
         # --- Output Settings ---
         output_frame = ttk.LabelFrame(
             content_frame, text="Output Settings", padding="15"
@@ -668,11 +993,11 @@ class SkodaAfterSalesExtractorGUI:
         mode_frame = ttk.Frame(output_frame)
         mode_frame.grid(row=0, column=1, columnspan=2, sticky="w")
 
-        self.mode_var = tk.StringVar(value="combined")
+        # (Variable initialized in __init__)
 
         self.rb_combined = ttk.Radiobutton(
             mode_frame,
-            text="Combined (All in one CSV)",
+            text="Combined (All in one Excel)",
             variable=self.mode_var,
             value="combined",
             command=self.toggle_filename_state,
@@ -681,7 +1006,7 @@ class SkodaAfterSalesExtractorGUI:
 
         self.rb_individual = ttk.Radiobutton(
             mode_frame,
-            text="Individual (Separate CSV per invoice)",
+            text="Individual (Separate Excel per invoice)",
             variable=self.mode_var,
             value="individual",
             command=self.toggle_filename_state,
@@ -692,7 +1017,7 @@ class SkodaAfterSalesExtractorGUI:
         ttk.Label(output_frame, text="Output Folder:").grid(
             row=1, column=0, sticky="w", padx=(0, 10), pady=5
         )
-        self.output_dir_var = tk.StringVar()
+        # (Variable initialized in __init__)
         self.entry_output_dir = ttk.Entry(
             output_frame, textvariable=self.output_dir_var, width=50
         )
@@ -710,9 +1035,7 @@ class SkodaAfterSalesExtractorGUI:
         ttk.Label(output_frame, text="Output Filename:").grid(
             row=2, column=0, sticky="w", padx=(0, 10), pady=5
         )
-        self.output_name_var = tk.StringVar(
-            value=f"Skoda_AfterSales_Extracted_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        )
+        # (Variable initialized in __init__)
         self.entry_output_name = ttk.Entry(
             output_frame, textvariable=self.output_name_var, width=50
         )
@@ -720,7 +1043,7 @@ class SkodaAfterSalesExtractorGUI:
 
         self.lbl_filename_hint = ttk.Label(
             output_frame,
-            text="(.csv added automatically)",
+            text="(.xlsx added automatically)",
             foreground="gray",
         )
         self.lbl_filename_hint.grid(row=2, column=2, sticky="w")
@@ -756,8 +1079,10 @@ class SkodaAfterSalesExtractorGUI:
         self.tree.pack(side="left", fill="both", expand=True)
         scrollbar_y.pack(side="right", fill="y")
 
+        scrollbar_y.pack(side="right", fill="y")
+
         # --- Status Bar ---
-        self.status_var = tk.StringVar(value="Ready")
+        # (Variable initialized in __init__)
         status_bar = ttk.Label(
             content_frame,
             textvariable=self.status_var,
@@ -790,7 +1115,7 @@ class SkodaAfterSalesExtractorGUI:
                 )
             self.status_var.set(
                 f"{len(self.selected_files)} file(s) loaded. "
-                "Click 'Extract & Generate CSV' to process."
+                "Click 'Extract & Generate Excel' to process."
             )
 
             # Auto-set output folder if empty
@@ -810,7 +1135,7 @@ class SkodaAfterSalesExtractorGUI:
             self.lbl_filename_hint.config(text="(Auto-named by Invoice No.)")
         else:
             self.entry_output_name.config(state="normal")
-            self.lbl_filename_hint.config(text="(.csv added automatically)")
+            self.lbl_filename_hint.config(text="(.xlsx added automatically)")
 
     def clear_files(self) -> None:
         """Clear all selected files and reset output path/filename."""
@@ -857,7 +1182,12 @@ class SkodaAfterSalesExtractorGUI:
                 self.status_var.set(f"Processing: {fname} ...")
                 self.root.update_idletasks()
 
-                result = extract_skoda_aftersales_invoice(fpath)
+                selected_format = self.format_var.get()
+                if selected_format == "vw":
+                    result = extract_vw_aftersales_invoice(fpath)
+                else:
+                    result = extract_skoda_aftersales_invoice(fpath)
+                
                 items = result["items"]
                 count = len(items)
                 inv_no = result.get("invoice_number", "N/A")
@@ -865,6 +1195,8 @@ class SkodaAfterSalesExtractorGUI:
 
                 total_items += count
 
+                is_vw = (selected_format == "vw")
+                
                 # --- INDIVIDUAL MODE ---
                 if mode == "individual" and items:
                     # Sanitize invoice number for filename
@@ -872,13 +1204,13 @@ class SkodaAfterSalesExtractorGUI:
                         c for c in inv_no if c.isalnum() or c in ('-', '_')
                     )
                     if safe_inv:
-                        indiv_name = f"{safe_inv}.csv"
+                        indiv_name = f"{safe_inv}.xlsx"
                     else:
                         base = os.path.splitext(fname)[0]
-                        indiv_name = f"{base}_Extracted.csv"
+                        indiv_name = f"{base}_Extracted.xlsx"
 
                     indiv_path = os.path.join(out_dir, indiv_name)
-                    write_csv(indiv_path, items)
+                    write_excel(indiv_path, items, is_vw=is_vw)
                     detail_msg = f"Saved: {indiv_name} ({count} items)"
 
                 # --- COMBINED MODE ---
@@ -910,15 +1242,16 @@ class SkodaAfterSalesExtractorGUI:
                     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     out_name = f"Skoda_AfterSales_Extracted_{timestamp}"
 
-                # Strip any existing .csv to avoid double extension
-                if out_name.lower().endswith(".csv"):
-                    out_name = out_name[:-4]
-                # Re-add .csv
-                out_name += ".csv"
+                # Strip any existing .xlsx to avoid double extension
+                if out_name.lower().endswith(".xlsx"):
+                    out_name = out_name[:-5]
+                # Re-add .xlsx
+                out_name += ".xlsx"
 
                 output_path = os.path.join(out_dir, out_name)
                 try:
-                    write_csv(output_path, combined_records)
+                    is_vw = (self.format_var.get() == "vw")
+                    write_excel(output_path, combined_records, is_vw=is_vw)
                     messagebox.showinfo(
                         "Success",
                         f"Combined extraction complete!\n\n"
@@ -928,7 +1261,7 @@ class SkodaAfterSalesExtractorGUI:
                     self.status_var.set(f"Done. Saved to {out_name}")
                 except Exception as e:
                     messagebox.showerror(
-                        "Error", f"Could not write combined CSV:\n{e}"
+                        "Error", f"Could not write combined Excel:\n{e}"
                     )
             else:
                 self.status_var.set("No data found to combine.")
