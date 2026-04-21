@@ -1,0 +1,69 @@
+--- Page 1 ---
+Daňový doklad / faktura
+Rechnung
+80554814
+Invoice
+05
+Kód dodávky - Code - Code
+Banka - Bank - Bank BIC/SWIFT GEBABEBBXXX Náložní list č. - Verladeschein - Loading list C 1003770163
+BNP Paribas Fortis (Fortis Bank SA/NV)
+Č. účtu - Bankkonto - Account 001-8336621-32 IČ - Kunden Nr. - Cust. No.
+IBAN BE90 0018 3366 2132 DIČ - UST. ID. NR.
+Příjemce faktury - Rechnungsempfänger - Invoice recipient Kupující - Kaufer - Buyer 2601200
+SKODA AUTO VOLKSWAGEN INDIA SKODA AUTO VOLKSWAGEN INDIA
+PRIVATE LIMITED PRIVATE LIMITED
+E-1, MIDC INDUSTRIAL AREA PHASE III E-1, MIDC INDUSTRIAL AREA PHASE III
+VILLAGE NIGOJE MHALUNGE KHARABWADI VILLAGE NIGOJE MHALUNGE KHARABWADI
+CHAKAN TAL KHED, Maharashtra CHAKAN TAL KHED
+410501 PUNE, India 410501 PUNE, Maharashtra
+India
+Dodací list - Lieferschein - Advice 9756300617
+Dodací podmínky - Lieferbedingungen - Delivery terms
+CPT Nhava Sheva Partner. spol./Ges.Nr./Comp.code 800
+Způsob dopravy - Transport - Transport Platební podmínky - Zahlungsbedingungen - Terms of payment
+road-marit Splatnost - Falligkeit - Due date 19.06.2026
+Místo určení - Bestimmungsort - Destination
+Skoda Auto Volkswagen India Pvt.Ltd
+CLC,E-1,MIDC Ind.Area,Phase III, Datum uskut.zdaň.plnění - Erfüllungstag - Date of taxable supply 20.01.2026
+Nigoje Mhalunge,Chakan, Den vystavení dokladu - Datum - Date 20.01.2026
+Pune-410501, India
+Order No. HS code Quant UoM Unit price Total price
+Wrap. No./Orig.country Name of Goods Wgt./Unit Reference
+Č.DOD.LISTU/AVISO NR:/AVIZE NO: 9756300617
+567 857 705 B RAA 870821 2 PC 89.03 178.06
+208002329063/RO Three-point aut 1.155 0313191
+208002329064
+Total weight 2.310 KG
+Total price: 178.06
+Freight 7.00 % 12.46
+It is a tax-exempt supply pursuant to s. 69 n. 235/2004 V.A.T. law.
+Total price: EUR *******190.52
+###########################################################################################
+Page 1/2
+Skoda Customer Care: transport.details@skoda-auto.cz
+Škoda Auto a.s., Tř.Václava Klementa 869, Mladá Boleslav II, 293 01 Mladá Boleslav, Czech Republic
+IČO: 00177041, DIČ: CZ00177041, Městský soud v Praze B 332
+==================================================
+--- Page 2 ---
+Daňový doklad / faktura
+Rechnung
+80554814
+Invoice
+State/Loading list IN/70163
+Cust.overview HS Price w/o costs Quant. Wgt/Tot.
+870821 178.06 2 2.310
+------------ ----- ------------
+Colli: 2 178.06 EUR 2 2.310 KG Net
+4.310 KG Gross
+We invoice you for delivery of goods.
+It is a tax-exempt supply pursuant to s. 66 n. 235/2004 V.A.T. law.
+DELIVERIES ACCORDING TO INCOTERMS 2020.
+Country of origin
+RO Romania
+Škoda Auto a.s. Page 2/2
+VAV/2 - After Sales Management GP/GA export
+293 01 Mladá Boleslav
+Skoda Customer Care: transport.details@skoda-auto.cz
+Škoda Auto a.s., Tř.Václava Klementa 869, Mladá Boleslav II, 293 01 Mladá Boleslav, Czech Republic
+IČO: 00177041, DIČ: CZ00177041, Městský soud v Praze B 332
+==================================================

@@ -35,7 +35,7 @@ def resource_path(relative_path: str) -> str:
 
 
 # ---------- EUR-STYLE → STANDARD NUMBER FORMATTING ----------
-def convert_eur_to_standard_format(value_str: str) -> str:
+def convert_eur_to_standard_format(value_str: str, prefer_decimal: bool = False) -> str:
     """
     Convert European number format to standard (INR/USD) format.
     European: 2.236,90 → Standard: 2,236.90
@@ -84,8 +84,9 @@ def convert_eur_to_standard_format(value_str: str) -> str:
         # Ambiguous case: 9.600 could be 9.6 or 9600.
         # In VW/European context, if no comma is present, dot is often thousands separator
         # if there are exactly 3 digits after it.
+        # For Skoda AG, we often want to preserve this as a decimal (e.g. weight 1.155).
         parts_list = value_str.split('.')
-        if len(parts_list) == 2 and len(parts_list[1]) == 3:
+        if not prefer_decimal and len(parts_list) == 2 and len(parts_list[1]) == 3:
             # Likely thousands: 9.600 -> 9600
             converted = value_str.replace('.', '')
             try:
@@ -111,7 +112,7 @@ def convert_eur_to_standard_format(value_str: str) -> str:
             return value_str
 
 
-def eur_str_to_float(value_str: str) -> float:
+def eur_str_to_float(value_str: str, prefer_decimal: bool = False) -> float:
     """
     Parse a European-formatted number string to a Python float.
     e.g. '2.236,90' → 2236.90, '0,297' → 0.297
@@ -136,7 +137,7 @@ def eur_str_to_float(value_str: str) -> float:
     elif '.' in value_str:
         # Only dot. Check if likely thousands (3 digits after)
         parts = value_str.split('.')
-        if len(parts) == 2 and len(parts[1]) == 3:
+        if not prefer_decimal and len(parts) == 2 and len(parts[1]) == 3:
             # 9.600 -> 9600
             return float(value_str.replace('.', ''))
         return float(value_str)
@@ -147,12 +148,12 @@ def eur_str_to_float(value_str: str) -> float:
             return 0.0
 
 
-def smart_format_number(value_str: str) -> str:
+def smart_format_number(value_str: str, prefer_decimal: bool = False) -> str:
     """
     Intelligently format a number string from EUR-style to standard.
     Always output standard-style (commas=thousands, period=decimal).
     """
-    num = eur_str_to_float(value_str)
+    num = eur_str_to_float(value_str, prefer_decimal=prefer_decimal)
     # Detect how many decimal places the original had
     cleaned = value_str.strip()
     if ',' in cleaned and '.' in cleaned:
@@ -422,18 +423,19 @@ def extract_skoda_aftersales_invoice(pdf_path: str) -> dict:
                     weight_str = match2.group(4).strip()
 
                     # Format numbers (EUR → standard)
-                    formatted_unit_price = convert_eur_to_standard_format(unit_price_str)
-                    formatted_total_price = convert_eur_to_standard_format(total_price_str)
-                    formatted_weight = convert_eur_to_standard_format(weight_str)
-                    formatted_quantity = convert_eur_to_standard_format(quantity_str)
+                    formatted_unit_price = convert_eur_to_standard_format(unit_price_str, prefer_decimal=True)
+                    formatted_total_price = convert_eur_to_standard_format(total_price_str, prefer_decimal=True)
+                    # User specifically requested weight 1.155 should NOT become 1155 for Skoda
+                    formatted_weight = convert_eur_to_standard_format(weight_str, prefer_decimal=True)
+                    formatted_quantity = convert_eur_to_standard_format(quantity_str, prefer_decimal=True)
 
                     # For quantity: if it looks like a whole number, format without decimals
                     try:
-                        qty_val = eur_str_to_float(quantity_str)
+                        qty_val = eur_str_to_float(quantity_str, prefer_decimal=True)
                         if qty_val == int(qty_val):
                             formatted_quantity = f"{int(qty_val):,}"
                         else:
-                            formatted_quantity = smart_format_number(quantity_str)
+                            formatted_quantity = smart_format_number(quantity_str, prefer_decimal=True)
                     except (ValueError, OverflowError):
                         formatted_quantity = quantity_str
 
