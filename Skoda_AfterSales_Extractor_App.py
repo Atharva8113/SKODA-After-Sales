@@ -251,6 +251,10 @@ def extract_skoda_aftersales_invoice(pdf_path: str) -> dict:
     invoice_number: str = ""
     invoice_date: str = ""
     currency: str = "EUR"
+    container_no: str = ""
+    package_count: str = ""
+    total_net_weight_inc_packing: str = ""
+    total_gross_weight: str = ""
     line_items: list[dict] = []
 
     with pdfplumber.open(pdf_path) as pdf:
@@ -260,6 +264,43 @@ def extract_skoda_aftersales_invoice(pdf_path: str) -> dict:
             text = page.extract_text()
             if text:
                 all_text_lines.extend(text.split('\n'))
+
+        full_text = "\n".join(all_text_lines)
+
+        # Extract container number (first matching ISO standard 4 letters + 7 digits)
+        container_match = re.search(r"\b([A-Z]{4}\d{7})\b", full_text)
+        if container_match:
+            container_no = container_match.group(1)
+
+        # Extract package count
+        pkg_match = re.search(r"(?:Colli|packaging|Packungen|Poč\.obalů):\s*(\d+)", full_text, re.IGNORECASE)
+        if pkg_match:
+            package_count = pkg_match.group(1)
+
+        # Extract total net weight inc packing
+        net_packing_match = re.search(
+            r"(?:Total weight inc\.\s*Packing\s*\(kg\)/Packungens\s*Gewicht|Total net weight \+)\s*:\s*([\d.,]+)",
+            full_text, re.IGNORECASE
+        )
+        if not net_packing_match:
+            net_packing_match = re.search(
+                r"Total weight inc\.\s*Packing.*?([\d.,]+)",
+                full_text, re.IGNORECASE
+            )
+        if net_packing_match:
+            total_net_weight_inc_packing = convert_eur_to_standard_format(net_packing_match.group(1), prefer_decimal=True)
+
+        # Extract total gross weight including packing
+        gross_match = re.search(r"([\d.,]+)\s*KG\s*Gross", full_text, re.IGNORECASE)
+        if not gross_match:
+            gross_match = re.search(
+                r"(?:total gross weight including packing|Bruttogewicht/Gross Weight/Poids Brut/Peso Bruto)\s*:\s*([\d.,]+)",
+                full_text, re.IGNORECASE
+            )
+        if not gross_match:
+            gross_match = re.search(r"Gross Weight.*?([\d.,]+)", full_text, re.IGNORECASE)
+        if gross_match:
+            total_gross_weight = convert_eur_to_standard_format(gross_match.group(1), prefer_decimal=True)
 
         # --- Extract Header Info ---
         for idx, line in enumerate(all_text_lines):
@@ -474,6 +515,10 @@ def extract_skoda_aftersales_invoice(pdf_path: str) -> dict:
         "invoice_number": invoice_number,
         "invoice_date": invoice_date,
         "currency": currency,
+        "container_no": container_no,
+        "package_count": package_count,
+        "total_net_weight_inc_packing": total_net_weight_inc_packing,
+        "total_gross_weight": total_gross_weight,
         "items": line_items,
     }
 
@@ -486,6 +531,10 @@ def extract_vw_aftersales_invoice(pdf_path: str) -> dict:
     invoice_number = ""
     invoice_date = ""
     currency = "USD"
+    container_no = ""
+    package_count = ""
+    total_net_weight_inc_packing = ""
+    total_gross_weight = ""
     items = []
     
     header_skip_patterns = [
@@ -497,6 +546,61 @@ def extract_vw_aftersales_invoice(pdf_path: str) -> dict:
 
     try:
         with pdfplumber.open(pdf_path) as pdf:
+            # Extract full text across all pages for global fields
+            all_text_list = []
+            for page in pdf.pages:
+                t = page.extract_text()
+                if t:
+                    all_text_list.append(t)
+            full_text = "\n".join(all_text_list)
+
+            # Extract container number
+            container_match = re.search(r"\b([A-Z]{4}\d{7})\b", full_text)
+            if container_match:
+                container_no = container_match.group(1)
+
+            # Extract package count
+            pkg_match = re.search(r"(?:Colli|packaging|Packungen|Poč\.obalů):\s*(\d+)", full_text, re.IGNORECASE)
+            if not pkg_match:
+                pkg_match = re.search(r"(?:No of Packages|Anz\.\s*Packstck\.)[^\n]*\n\s*(\d+)", full_text, re.IGNORECASE)
+            if pkg_match:
+                package_count = pkg_match.group(1)
+
+            # Extract total net weight inc packing
+            net_packing_match = re.search(
+                r"(?:Total weight inc\.\s*Packing\s*\(kg\)/Packungens\s*Gewicht|Total net weight \+|Nettogewicht/Net Weight/Poids Net/Peso Neto:)\s*:\s*([\d.,]+)",
+                full_text, re.IGNORECASE
+            )
+            if not net_packing_match:
+                net_packing_match = re.search(
+                    r"(?:Nettogewicht/Net Weight/Poids Net/Peso Neto:)[^\n]*\n[^\n]*?([\d.,]+)\s*KG",
+                    full_text, re.IGNORECASE
+                )
+            if not net_packing_match:
+                net_packing_match = re.search(
+                    r"Total weight inc\.\s*Packing.*?([\d.,]+)",
+                    full_text, re.IGNORECASE
+                )
+            if net_packing_match:
+                total_net_weight_inc_packing = convert_eur_to_standard_format(net_packing_match.group(1), prefer_decimal=True)
+
+            # Extract total gross weight
+            gross_match = re.search(r"([\d.,]+)\s*KG\s*Gross", full_text, re.IGNORECASE)
+            if not gross_match:
+                gross_match = re.search(
+                    r"(?:total gross weight including packing|Bruttogewicht/Gross Weight/Poids Brut/Peso Bruto)\s*:\s*([\d.,]+)",
+                    full_text, re.IGNORECASE
+                )
+            if not gross_match:
+                gross_match = re.search(
+                    r"(?:Bruttogewicht/Gross Weight/Poids Brut/Peso Bruto:)[^\n]*\n[^\n]*?([\d.,]+)\s*KG",
+                    full_text, re.IGNORECASE
+                )
+            if not gross_match:
+                gross_match = re.search(r"Gross Weight.*?([\d.,]+)", full_text, re.IGNORECASE)
+            if gross_match:
+                total_gross_weight = convert_eur_to_standard_format(gross_match.group(1), prefer_decimal=True)
+
             # 1. Header Extraction (Usually on first page)
             first_page = pdf.pages[0].extract_text()
             header_inv_match = re.search(r"INVOICE\s*:\s*(\d{8,})", first_page)
@@ -640,12 +744,16 @@ def extract_vw_aftersales_invoice(pdf_path: str) -> dict:
         "invoice_number": invoice_number,
         "invoice_date": invoice_date,
         "currency": currency,
+        "container_no": container_no,
+        "package_count": package_count,
+        "total_net_weight_inc_packing": total_net_weight_inc_packing,
+        "total_gross_weight": total_gross_weight,
         "items": items,
     }
 
 
 # ---------- EXCEL OUTPUT ----------
-def write_excel(output_path: str, all_records: list[dict], is_vw: bool = False) -> None:
+def write_excel(output_path: str, all_records: list[dict], is_vw: bool = False, summary_records: list[dict] = None) -> None:
     """Write all extracted records to a single Excel file using Pandas."""
     if not all_records:
         return
@@ -746,16 +854,49 @@ def write_excel(output_path: str, all_records: list[dict], is_vw: bool = False) 
                     worksheet.cell(row=last_row, column=1, value="Total Unique Packages:")
                     worksheet.cell(row=last_row, column=2, value=unique_count)
 
-            # Auto-adjust columns width
+            # Auto-adjust columns width for Sheet1
             worksheet = writer.sheets['Sheet1']
             for i, col in enumerate(df.columns):
                 col_data = df[col].astype(str)
                 max_val_len = col_data.str.len().max()
                 if pd.isna(max_val_len): max_val_len = 0
                 column_len = max(max_val_len, len(col)) + 2
-                # Convert index to Excel column letter
                 col_letter = chr(65 + i) if i < 26 else f"{chr(64 + i // 26)}{chr(65 + i % 26)}"
                 worksheet.column_dimensions[col_letter].width = min(column_len, 50)
+
+            # 2. Write the new "Summary" sheet if summary_records are provided
+            if summary_records:
+                df_summary = pd.DataFrame(summary_records)
+                summary_cols = ["Invoice Number", "Container Number", "No of Package", "Gross Weight"]
+                df_summary = df_summary[[c for c in summary_cols if c in df_summary.columns]]
+                
+                for col in ["Invoice Number", "Container Number"]:
+                    if col in df_summary.columns:
+                        df_summary[col] = df_summary[col].astype(str).replace('nan', '')
+                
+                if "No of Package" in df_summary.columns:
+                    def clean_to_int_float(v):
+                        if pd.isna(v) or v == "" or v == "N/A":
+                            return ""
+                        try:
+                            return int(float(str(v).replace(',', '')))
+                        except ValueError:
+                            return v
+                    df_summary["No of Package"] = df_summary["No of Package"].apply(clean_to_int_float)
+                
+                if "Gross Weight" in df_summary.columns:
+                    df_summary["Gross Weight"] = df_summary["Gross Weight"].astype(str).replace('nan', '')
+
+                df_summary.to_excel(writer, index=False, sheet_name='Summary')
+                
+                ws_summary = writer.sheets['Summary']
+                for i, col in enumerate(df_summary.columns):
+                    col_data = df_summary[col].astype(str)
+                    max_val_len = col_data.str.len().max()
+                    if pd.isna(max_val_len): max_val_len = 0
+                    column_len = max(max_val_len, len(col)) + 2
+                    col_letter = chr(65 + i) if i < 26 else f"{chr(64 + i // 26)}{chr(65 + i % 26)}"
+                    ws_summary.column_dimensions[col_letter].width = min(column_len, 50)
     except Exception as e:
         print(f"Error writing Excel: {e}")
         raise
@@ -1168,6 +1309,7 @@ class SkodaAfterSalesExtractorGUI:
 
         mode = self.mode_var.get()
         combined_records: list[dict] = []
+        summary_records: list[dict] = []
         total_items = 0
 
         self.btn_run.config(state="disabled")
@@ -1195,6 +1337,13 @@ class SkodaAfterSalesExtractorGUI:
                 inv_no = result.get("invoice_number", "N/A")
                 inv_date = result.get("invoice_date", "N/A")
 
+                summary_records.append({
+                    "Invoice Number": inv_no,
+                    "Container Number": result.get("container_no", ""),
+                    "No of Package": result.get("package_count", ""),
+                    "Gross Weight": result.get("total_gross_weight", "")
+                })
+
                 total_items += count
 
                 is_vw = (selected_format == "vw")
@@ -1212,7 +1361,7 @@ class SkodaAfterSalesExtractorGUI:
                         indiv_name = f"{base}_Extracted.xlsx"
 
                     indiv_path = os.path.join(out_dir, indiv_name)
-                    write_excel(indiv_path, items, is_vw=is_vw)
+                    write_excel(indiv_path, items, is_vw=is_vw, summary_records=[summary_records[-1]])
                     detail_msg = f"Saved: {indiv_name} ({count} items)"
 
                 # --- COMBINED MODE ---
@@ -1253,7 +1402,7 @@ class SkodaAfterSalesExtractorGUI:
                 output_path = os.path.join(out_dir, out_name)
                 try:
                     is_vw = (self.format_var.get() == "vw")
-                    write_excel(output_path, combined_records, is_vw=is_vw)
+                    write_excel(output_path, combined_records, is_vw=is_vw, summary_records=summary_records)
                     messagebox.showinfo(
                         "Success",
                         f"Combined extraction complete!\n\n"
